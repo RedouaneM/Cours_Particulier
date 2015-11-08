@@ -1,0 +1,831 @@
+package ejb;
+
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.regex.Pattern;
+
+import javax.ejb.Singleton;
+import javax.ejb.TransactionAttribute;
+import javax.ejb.TransactionAttributeType;
+import javax.persistence.EntityManager;
+import javax.persistence.PersistenceContext;
+import javax.servlet.ServletException;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.Part;
+
+@Singleton
+@TransactionAttribute(TransactionAttributeType.REQUIRES_NEW)
+public class Facade {
+
+	@PersistenceContext
+	private EntityManager em;
+
+	private Personne persConnecte=null;
+	private static final int    taille   = 10240; //10 ko
+	//resultat pour verification.
+	private String resultat;
+	private Collection<String> erreurs = new ArrayList<String>();
+
+
+	
+	//***************************************************getters***************************************************
+	
+	/**Renvoie resultat. */
+	public String getResultat() {
+		return resultat;
+	}
+
+	/**Retourne les erreurs. */
+	public Collection<String> getErreurs() {
+		return erreurs;
+	}
+
+	public Personne getPersonneConnecte() {
+		return persConnecte;
+	}
+
+	//Rajouter les erreurs si exception lever.
+	public void setErreur(String message ) {
+		erreurs.add(message );
+	}
+
+	/**Vider la liste des erreurs.*/
+	public void InitErreurs(){
+		erreurs.clear();
+	}
+	
+	
+	/**renvoie les identifiants des inscrits.*/
+	public Collection<String> getIdentifiants() {
+		Collection<String> idents = new ArrayList<String>();
+		Collection<Personne> personnes = em.createQuery("select p from Personne p").getResultList();
+		for (Personne p:personnes) {
+			idents.add(p.getIdentifiant());
+		}
+		return idents;
+	}
+	
+	/**renvoie la matiere a partir de son id.*/
+	public Matiere getMatiere(int id) {
+		Matiere m=null;
+		Collection<Matiere> matieres = em.createQuery("select m from Matiere m where m.id Like :id").
+				setParameter("id",id ).getResultList();
+		Iterator<Matiere> it = matieres.iterator();
+		if(it.hasNext())
+			m=it.next();
+		return m;
+	}
+	
+	/**renvoie la Personne a partir de son id.*/
+	public Personne getPersonne(int i) {
+		return em.find(Personne.class, i);
+	}
+
+	/**renvoie la Personne a partir de son identifiant.*/
+	public Personne getPersonne(String identifiant) {
+		Personne p=null;
+		Collection<Personne> personnes = em.createQuery("select p from Personne p where p.identifiant Like :identifiant").
+		setParameter("identifiant",identifiant ).getResultList();
+		Iterator<Personne> it = personnes.iterator();
+		if(it.hasNext())
+		p=it.next();
+		return p;
+	}
+	//*************************************************************************************************************
+	
+	
+	
+	
+	//*************************************************Validations***********************************************
+	/** Valide l'adresse email saisie. */
+	private void validationEmail( String email ) throws Exception {
+		if ( email != null && !email.matches( "([^.@]+)(\\.[^.@]+)*@([^.@]+\\.)+([^.@]+)" ) ) {
+			throw new Exception( "Merci de saisir une adresse mail valide." );
+		}
+	}
+
+	/** Valide l'adresse email saisie. */
+	private void validationIdent( String ident ) throws Exception {
+		if(ident==null){
+			throw new Exception("Veuillez saisir un identifiant.");
+		}
+		else {
+			Collection<Personne> personnes = em.createQuery("select p from Personne p where p.identifiant Like :identUtil").
+					setParameter("identUtil",ident ).getResultList();
+			if(!personnes.isEmpty()){
+				throw new Exception("Identifiant deja� utilise saisissez un autre. ");
+			}
+		}
+	}
+
+	/**Validation du mot de passe. */
+	private void validationMdp( String mdp , String conf ) throws Exception {
+		if(mdp==null || conf==null){
+			throw new Exception("Veuillez saisir un mot de passe.");
+		}
+		else {
+			if(mdp.length()<3){
+				throw new Exception("il doit y avoir au moins 3 caracteres. ");
+			}
+			if(!mdp.equals(conf)){
+				throw new Exception("Erreur dans la saisie du mot de passe. ");
+			}
+		}
+	}
+
+	/**Valider l'authentification et renvoie la personne si aucune erreur. */
+	private Personne validationAuth(String ident,String mdp) throws Exception {
+		Personne p = null;
+		if ( ident != null ) {
+			Collection<Personne> personnes = em.createQuery("select p from Personne p where p.identifiant Like :identUtil").
+					setParameter("identUtil",ident ).getResultList();
+			Iterator<Personne> it = personnes.iterator();
+			if(it.hasNext())
+				p=it.next();
+	
+			if(p==null){
+				throw new Exception("Identifiant incorrect. ");
+			}
+			else {
+				if ( mdp != null ) {
+					if(!p.getMdp().equals(mdp)){
+						throw new Exception( "mot de passe incorrect." );
+					}
+				}
+	
+				else {
+					throw new Exception( "Merci de saisir votre mot de passe." );
+				}
+			}
+		}
+		else{
+			throw new Exception( "Merci de saisir votre identifiant." );
+		}
+		return p;
+	}
+	
+	/**valider le titre de l'annonce.*/
+	private void validationTitre(String titre) throws Exception {
+		if (titre.equals("")) {
+			throw new Exception("Veuillez donner un titre a votre annonce");
+		}
+	}
+
+	/**validation du message de l'annonce.*/
+	private void validationMessage(String message) throws Exception {
+		if (message.equals("")) {
+			throw new Exception("Veuillez entrer le message de votre annonce");
+		}
+	}
+
+	/**validation du prix de l'annonce.*/
+	public void validationPrix(String prix)  {
+		int cmp = 0;
+		for (int i=0;i<prix.length();i++) {
+			if (Character.isDigit(prix.charAt(i)) ) {
+				cmp++;
+			}
+		}
+		if (prix.length() != cmp) {
+			erreurs.add("Veuillez entrer un prix valide");
+		}
+	}
+	private boolean estNumero(String num){
+		char[] c = num.toCharArray();
+		for(int i=0;i<num.length();i++){
+			if(!java.lang.Character.isDigit(c[i])){
+				return false;
+			}
+		}
+		return true;
+	}
+	private void validationInscription( String nom,String prenom, String tel ) throws Exception {
+		if ( nom.equals("") || prenom.equals("") || tel.equals("") ) {
+			throw new Exception( "Merci de renseigner tous les champs." );
+		}
+		if(!estNumero(tel) || tel.length()<10){
+			throw new Exception( "votre numero de telephone est incorrect ." );
+		}
+	}
+	//*************************************************************************************************************
+	
+	
+	//*************************************************Profil Personne*************************************************
+	/**Se connecter en fournissant un identifiant et un mot de passe.*/
+	public void connecter( String ident , String motDePasse ) {
+
+		/* Validation de l'authentification. */
+		Personne p = null;
+
+		try {
+			p=validationAuth( ident, motDePasse );
+		} catch ( Exception e ) {
+			setErreur(e.getMessage() );
+			System.out.println("erreur dans validationAuth");
+		}
+
+		/* Initialisation du resultat global de la validation. */
+		if ( erreurs.isEmpty() ) {
+			resultat = "Succes de la connexion.";
+			if(p!=null) persConnecte=p;
+		} else {
+			resultat = "echec de la connexion.";
+		}
+
+
+	}
+
+	/**Se deconnecter.*/
+	public void deconnecter() {
+		this.persConnecte=null;
+	}
+
+	/**Verifier si une Personne a deja fait remember me*/
+	public boolean recupererSession(String id) {
+		boolean rec = false;
+		Personne p = null;
+		Collection<Personne> personnes = em.createQuery("select p from Personne p where "
+				+ "p.session_id Like :session_Id").setParameter("session_Id",id ).getResultList();
+		Iterator<Personne> it = personnes.iterator();
+		if(it.hasNext())
+			p=it.next();
+
+		if(p!=null){
+			persConnecte = p;
+			rec = true;
+		}
+		return rec;
+	}
+
+	
+
+	/**L'inscription d'une personne.*/
+	public void inscrire(String nom,String prenom, String tel,String email,String ident,String mdp ,String confmdp){
+		try{
+			validationInscription(nom,prenom,tel);
+		} catch(Exception e){
+			setErreur(e.getMessage());
+			System.out.println("validationInscription erreur");
+		}
+
+		try {
+			validationEmail(email);
+		} catch (Exception e) {
+			setErreur(e.getMessage());
+			System.out.println("validationEmail erreur");
+		}
+		try {
+			validationIdent(ident);
+		} catch (Exception e) {
+			setErreur(e.getMessage());
+			System.out.println("validationIdent erreur");
+		}
+		try {
+			validationMdp(mdp,confmdp);
+		} catch (Exception e) {
+			setErreur(e.getMessage());
+			System.out.println("validationMdp erreur");
+		}
+
+		if(erreurs.isEmpty()){
+			Personne p = new Personne(nom,prenom,tel,email,ident,mdp);
+			em.persist(p);
+			persConnecte = p;
+		}
+	}
+
+	
+	
+	/**modifier son profil.*/
+	public void updateProfil(String nom2, String prenom2, String tel2,
+			String email2, String ident2) {
+		try {
+			validationEmail(email2);
+		} catch (Exception e) {
+			setErreur(e.getMessage());
+			System.out.println("validationEmail erreur");
+		}
+		try {
+			if(!persConnecte.getIdentifiant().equals(ident2))
+				validationIdent(ident2);
+		} catch (Exception e) {
+			setErreur(e.getMessage());
+			System.out.println("validationIdent erreur");
+		}
+
+		if(erreurs.isEmpty()){
+			getPersonne(persConnecte.getId()).setNom(nom2);
+			getPersonne(persConnecte.getId()).setPrenom(prenom2);
+			getPersonne(persConnecte.getId()).setEmail(email2);
+			getPersonne(persConnecte.getId()).setIdentifiant(ident2);
+			getPersonne(persConnecte.getId()).setTel(tel2);
+			persConnecte=getPersonne(persConnecte.getId());//mettre � jour le personne connecter
+		}
+
+	}
+	
+	/**changer mot de passe.*/
+	public void updatePassword(String oldpwd, String newpwd, String confpwd) {
+		if(!persConnecte.getMdp().equals(oldpwd)){
+			erreurs.add("mot de passe incorrect." );
+		}
+		else{
+			try {
+				this.validationMdp(newpwd, confpwd);
+			} catch (Exception e) {
+				setErreur(e.getMessage() );
+			}
+			if ( erreurs.isEmpty() ) {
+				resultat = "Succes de la connexion.";
+				getPersonne(persConnecte.getId()).setMdp(newpwd);//pour modifier dans la base de donner
+				persConnecte=getPersonne(persConnecte.getId());//mettre a jour le personne connecter
+			}
+		}
+
+	}
+	
+	/**supprimer profil.*/
+	public void deleteProfil(String mdp2) {
+		if(!persConnecte.getMdp().equals(mdp2)){
+			erreurs.add("mot de passe incorrect." );
+		}
+		else{
+			int n2= em.createNativeQuery("delete from Annonce  where proprio_id="+persConnecte.getId()+";").executeUpdate();
+			System.out.println("n2:"+n2);
+			int n= em.createNativeQuery("delete from Personne  where id="+persConnecte.getId()+";").executeUpdate();
+			System.out.println("n:"+n);
+			persConnecte=null;
+		}
+	}
+	
+	/**fait correspondre une session id a une Personne(identifiant).*/
+	public void ajouterSessionId(String identifiant,String session_id) {
+		int n= em.createNativeQuery("update Personne SET session_id='"+session_id+"' where identifiant='"+identifiant+"';").executeUpdate();
+	}
+	
+	
+	//*************************************************************************************************************
+	
+	
+	
+	
+	//**************************************************Annonce****************************************************
+	/**Renvoie la liste des annonces correspondants aux criteres pris en parametres.*/
+	public Collection<Annonce> rechercherAnnonces(int  matiere_id,int ville_id,int prix_min,int prix_max) {
+		Collection<Annonce> annonces = new LinkedList<Annonce>();
+		Collection<Object> objets =  em.createNativeQuery("select * from Annonce where matiere_id='"+matiere_id+"' and ville_id='"+ville_id+"' and prix>='"+prix_min+"' and prix<='"+prix_max+"';").getResultList();
+		Iterator<Object> it = objets.iterator();
+		while(it.hasNext()){
+			Object[] obj = (Object[]) it.next();
+			Annonce a = new Annonce(String.valueOf(obj[5]),String.valueOf(obj[3]),
+					Integer.parseInt(String.valueOf(obj[4])),Boolean.getBoolean(String.valueOf(obj[1])));
+			a.setId((int)obj[0]);
+			a.setMatiere(em.find(Matiere.class, (int)obj[2]));
+			a.setProprio(em.find(Personne.class, (int)obj[6]));
+			annonces.add(a);
+		}
+		return annonces;
+	}
+	
+	/**deposer une annonce en fournissant ses elements. */
+	public void deposerAnnonce(int m,String titre,String message,String sprix,boolean estOffre,int v) {
+		try {
+			validationTitre(titre);
+		} catch (Exception e) {
+			setErreur(e.getMessage());
+		}
+		try {
+			validationMessage(message);
+		} catch (Exception e) {
+			setErreur(e.getMessage());
+		}
+		try {
+			if(sprix.equals(""))
+				erreurs.add("le prix est non renseing�");
+			validationPrix(sprix);
+		} catch (Exception e) {
+			setErreur(e.getMessage());
+		}
+		if(erreurs.isEmpty()){
+		int prix = Integer.parseInt(sprix);
+
+		Annonce a = new Annonce(titre, message, prix, estOffre);
+		a.setMatiere(em.find(Matiere.class, m));
+		a.setVille(em.find(Ville.class,v));
+		a.setProprio(persConnecte);
+		em.persist(a);
+		}
+	}
+	
+	/**modification d'un annonce .*/
+	public void rectifierAnnonce(int id, int matiererec_id, String titrerec,
+			String messagerec, String prixrec, Boolean isOffrerec,
+			int id_villerec) {
+		try {
+			validationTitre(titrerec);
+		} catch (Exception e) {
+			setErreur(e.getMessage());
+		}
+		try {
+			validationMessage(messagerec);
+		} catch (Exception e) {
+			setErreur(e.getMessage());
+		}
+		try {
+			validationPrix(prixrec);
+		} catch (Exception e) {
+			setErreur(e.getMessage());
+		}
+		int prix = Integer.parseInt(prixrec);
+		if(erreurs.isEmpty()){
+			int offre = 0;
+			if(isOffrerec) offre=1;
+			int n= em.createNativeQuery("update Annonce SET matiere_id='"+matiererec_id+"', titre = '"+titrerec+"', message='" 
+					+messagerec+"', prix='"+prix+"', ville_id ='"+id_villerec+"', estOffre ='"+offre+"' where id="+id+";").executeUpdate();
+		}
+
+	}
+
+
+	/**Renvoie les annonces d'une personne en fournissant son id.*/
+	public Collection<Annonce> getMesAnnonces(int IdPers, boolean b){
+		Collection<Annonce> annonces = em.createQuery("select a from Annonce a where a.proprio Like :Pers and estOffre="+b).
+					setParameter("Pers",getPersonne(IdPers)).getResultList();
+		return annonces; 
+	}
+
+
+	/**renvoie une annonce a partir de son id.*/
+	public Annonce getAnnonce(int id){
+		return em.find(Annonce.class, id);
+	}
+
+
+	/**recuperer nom ville d'une annonce a partir de son id.*/
+	public String getNomVille(int AnnId){
+		Object annonce = em.createNativeQuery("select * from Annonce  where id="+AnnId+";").getSingleResult();
+		Object[] obj1 = (Object[]) annonce;
+		int id_ville = Integer.parseInt(String.valueOf(obj1[7]));
+		System.out.println("idville :" +id_ville);
+		Object ville = em.createNativeQuery("select * from Ville  where id="+id_ville+";").getSingleResult();
+		Object[] obj2 = (Object[]) ville;
+		System.out.println("nom ville :" +String.valueOf(obj2[1]));
+		return String.valueOf(obj2[1]);
+	}
+	
+	/**Renvoie pays correspondant a la ville*/
+	public String getCodePays(int idville) {
+		Object ville = em.createNativeQuery("select * from Ville  where id="+idville+";").getSingleResult();
+		Object[] obj2 = (Object[]) ville;
+		System.out.println("nom pays :" +String.valueOf(obj2[1]));
+		return String.valueOf(obj2[2]);
+	}
+	
+	/**Supprime une annonce.*/
+	public void supprimerAnnonce(int id){
+		em.createNativeQuery("delete from Commentaire where annonce_id='"+id+"'").executeUpdate();
+		em.createNativeQuery("delete from Vote where annonce_id='"+id+"'").executeUpdate();
+		em.createNativeQuery("delete from Follower where annonce_id='"+id+"'").executeUpdate();
+		em.createNativeQuery("delete from Annonce where id='"+id+"'").executeUpdate();
+	}
+	
+	
+	/**Renvoie les 8 dernieres annonces deposees .*/
+	public Collection<Annonce> getAnnoncesRecentes(){
+		LinkedList<Annonce> annoncesRecentes = 
+				new LinkedList<Annonce>(em.createQuery("Select a from Annonce a").getResultList());
+		int nb = annoncesRecentes.size();
+		if(nb<=8){
+			return annoncesRecentes;
+		}
+		else {
+			return annoncesRecentes.subList(nb-8,nb);
+		}
+	}
+	
+	/**renvoie les annonces similaire a une annonce.*/
+	public Object getAnnoncesSimilaire(int idAnnonce) {
+		Annonce annonce = getAnnonce(idAnnonce);
+		Collection<Annonce> annonces = em.createQuery("select a from Annonce a where a.ville Like :ville and id<>"+idAnnonce).
+				setParameter("ville",annonce.getVille() ).getResultList();
+		int nb = annonces.size();
+		if(nb<=6){
+			return annonces;
+		}
+		else {
+			return ((List) annonces).subList(nb-6,nb);
+		}
+	}
+	
+	//*************************************************************************************************************
+	
+	
+	
+	
+	
+	//*********************************************Verifications***************************************************
+	/**verifier si une personne a deja vote .*/
+	public boolean dejaVote(int idPers,int idAn) {
+		Collection<Object> objets =  em.createNativeQuery("select * from Vote where membreVote_id='"+
+				idPers+"'and annonce_id='"+idAn+"'").getResultList();
+		return(objets.size()!=0);
+	}
+	
+	/**verfier si une Personne(idPers) est proprietaire de l'annonce(idAn).*/
+	public boolean isProprio(int idAn,int idPers) {
+		Collection<Object> objets =  em.createNativeQuery("select proprio_id from Annonce where id='"+
+				idAn+"';").getResultList();
+		Iterator<Object> it = objets.iterator();
+		int id=0;
+		if(it.hasNext()) {
+			Object obj = (Object) it.next();
+			id=(int)obj;
+
+		}
+		return(id==idPers);
+	}
+
+	/**verifier si une personne(idPers) suit une annonce(idAn).*/
+	public boolean estMisEnRelation(int idAn,int idPers) {
+		Collection<Object> objets =  em.createNativeQuery("select * from Follower where annonce_id='"+
+				idAn+"' and membreSuiveur_id='"+idPers+"' ;").getResultList();
+		return(objets.size()!=0);
+	}
+	
+	//*************************************************************************************************************
+	
+
+	//**********************************************Interactions Membres********************************************
+	/**Suivre un professeur. */
+	public void misEnRelation(String identifiant, int id_ann) {
+		Annonce annonce  = this.getAnnonce(id_ann);
+		Personne suiveur = this.getPersonne(identifiant);
+		if (!estMisEnRelation(id_ann,suiveur.getId())) {
+			Follower p = new Follower();
+			p.setMembreSuiveur(suiveur);
+			p.setAnnonce(annonce);
+			em.persist(p);
+		}
+	}
+
+	/**ne plus suivre.*/
+	public void supprimerSuivi(int idAn,int idPers){
+		em.createNativeQuery("delete from Follower where annonce_id='"+idAn+"' and membreSuiveur_id='"+idPers+"'").executeUpdate();
+	}
+
+	
+	/**Renvoie les annonces que je suis en train de suivre.*/
+	public Collection<Annonce> getAnnoncesQueJeSuis(int IdPers){
+		Collection<Annonce> annonces = new LinkedList<Annonce>();
+		Collection<Object> objets =  em.createNativeQuery("select * from Follower where membreSuiveur_id='"+
+				IdPers+"'").getResultList();
+		Iterator<Object> it = objets.iterator();
+		while(it.hasNext()){
+			Object[] obj = (Object[]) it.next();
+			System.out.println((int)obj[1]);
+			Annonce a = this.getAnnonce((int)obj[3]);
+			annonces.add(a);
+		}
+		return annonces;
+	}
+
+
+	/**Renvoie les membres qui me suivent.*/
+	public Collection<Couple_AP> getMembresQuiMeSuivent(int IdPers){
+		boolean bo = false;
+		Collection<Couple_AP> ap = new LinkedList<Couple_AP>();
+		Collection<Object> objets =  em.createNativeQuery("select F.membreSuiveur_id,F.annonce_id from Annonce A,Follower F where A.proprio_id='"+
+				IdPers+"' and A.id=F.annonce_id and F.membreSuiveur_id<>'"+IdPers+"';").getResultList();
+		Iterator<Object> it = objets.iterator();
+		while(it.hasNext()){
+			Object obj[] = (Object[]) it.next();
+			Annonce a = this.getAnnonce((int)obj[1]);
+			Personne p = this.getPersonne(((int)obj[0]));
+			Collection<Personne> personnes = new ArrayList<Personne>();
+			for(Couple_AP c:ap) {
+				if (c.getAnnonce_AP()==a) {
+					c.getPersonnes_AP().add(p);
+					bo=true;
+					break;
+				}
+			}
+			if(!bo) {
+				personnes.add(p);
+				ap.add(new Couple_AP(a,personnes));
+			}
+		}
+		return ap;
+	}
+
+	/**Ecrire un commentaire.*/
+	public void comment(String identifiant, int idAnnonce1, String commentaire) {
+		Commentaire c = new Commentaire();
+		c.setAnnonce(this.getAnnonce(idAnnonce1));
+		c.setCommentaire(commentaire);
+		c.setMembreEmetteur(getPersonne(identifiant));
+		c.setMembreRecepteur(getAnnonce(idAnnonce1).getProprio());
+		em.persist(c);
+	}
+	
+	/**supprimer un commentaire.*/
+	public void SupprimerCommentaire(int id) {
+		em.createNativeQuery("delete from Commentaire where id='"+id+"'" ).executeUpdate();
+	}
+	
+	/**renvoie les commentaires d'une annonce.*/
+	public Collection<Commentaire> getCommentaires_dune_annonce(int id_annonce){
+		return getAnnonce(id_annonce).commentaires_recus;
+	}
+	
+	/**renvoie les commentaires qu'une Personne a reçu.*/
+	public Collection<Commentaire> getCommentaires_recus(int id_personne){
+		Collection<Commentaire> commentaires = new ArrayList<Commentaire>(getPersonne(id_personne).commentaires_recu);
+		for(Commentaire c : getPersonne(id_personne).commentaires_recu){
+			if(c.getMembreEmetteur().getId()==id_personne)
+				commentaires.remove(c);
+		}
+		return commentaires;
+		//return getPersonne(id_personne).commentaires_recu;
+	}
+	
+	/**renvoie les commentaires qu'une Personne a emis..*/
+	public Collection<Commentaire> getCommentaires_emis(int id_personne){
+		return getPersonne(id_personne).commentaires_emis;
+	}
+	
+	
+	
+	/**voter pour une annonce.*/
+	public void voter(int idAn, int note) {
+		Vote v = new Vote();
+		Annonce an = getAnnonce(idAn);
+		v.setAnnonce(an);
+		v.setMembreVote(persConnecte);
+		v.setMembreRecepteur(an.getProprio());
+		em.persist(v);
+		float oldnote=an.getNote();
+		int nbPers=an.getNbPersNotee();
+		an.setNote((oldnote*nbPers+note)/(nbPers+1));
+		an.setNbPersNotee(nbPers+1);
+	}
+
+	
+	
+	//******************************************************************************************************************
+
+	
+	
+	
+	
+	
+	
+	
+	//*******************************************Fichier Image**********************************************************
+
+
+
+	private void ValidationImage(String nom) throws Exception{
+		if(nom ==null || nom.isEmpty()){
+			throw new Exception("Merci d'inserer une photo de profil");
+		}
+		else {
+			nom = nom.substring( nom.lastIndexOf( '/' ) + 1 )
+					.substring( nom.lastIndexOf( '\\' ) + 1 );
+			String[] parts = nom.split(Pattern.quote("."));
+			if(parts.length<2){
+				throw new Exception("Merci d'insérer une photo de profil au bon format");
+			}
+			else {
+				if(!parts[1].matches("jpg") & !parts[1].matches("png") & !parts[1].matches("jpeg")){
+					throw new Exception("Les extentions permises sont : jpg,png et jpeg ");
+				}
+			}
+
+		}
+	}
+
+
+	/**validation du fichier envoye.*/
+	private void validationFichier( InputStream contenuFichier ) throws Exception {
+		if (  contenuFichier == null ) {
+			throw new Exception( "Merci de sélectionner un fichier à envoyer." );
+		}
+	}
+
+	/**ecrire le fichier sur le disque dur.*/
+	private void ecrireFichier( InputStream contenu, String nomFichier,String chemin ) throws Exception {
+		BufferedInputStream entree = null;
+		BufferedOutputStream sortie = null;
+		try {
+			//Ouvre les flux.
+			entree = new BufferedInputStream(contenu, taille);
+			sortie = new BufferedOutputStream( new FileOutputStream( new File( chemin+ nomFichier ),false ),
+					taille );
+			//copier le contenu.
+			byte[] tampon = new byte[taille];
+			int longueur = 0;
+			while ( ( longueur = entree.read( tampon ) ) > 0 ) {
+				sortie.write( tampon, 0, longueur );
+			}
+		} finally {
+			try {
+				sortie.close();
+			} catch ( IOException ignore ) {
+				System.out.println("problem dans sortie.close()");
+			}
+			try {
+				entree.close();
+			} catch ( IOException ignore ) {
+				System.out.println("problem dans entree.close()");
+			}
+		}
+	}
+
+	/**verifie s'il s'agit d'un fichiet si oui, il retourne son nom.*/
+	private static String getNomFichier( Part part ) {
+		//Boucle sur chacun des paramètres de l'en-tête "content-disposition". 
+		for ( String contentDisposition : part.getHeader( "content-disposition" ).split( ";" ) ) {
+			//Recherche de l'éventuelle présence du paramètre "filename". 
+			if ( contentDisposition.trim().startsWith( "filename" ) ) {
+				//renvoyer le nom du fichier.
+				return contentDisposition.substring( contentDisposition.indexOf( '=' ) + 1 ).trim().replace( "\"", "" );
+			}
+		}
+		return null;
+	}
+
+	public String enregistrerFichier( HttpServletRequest request,String nomFichierVoulu,String chemin ) {
+		String fichier=new String();
+
+		//Récupération du contenu du champ fichier du formulaire.
+		String nomFichier = null;
+		InputStream contenuFichier = null;
+		try {
+			Part part = request.getPart("imagePersonne");
+			//recuperer nom fichier.
+			nomFichier = getNomFichier( part );
+			try {
+				ValidationImage(nomFichier);
+				contenuFichier = part.getInputStream();
+			} catch (Exception e) {
+				setErreur(e.getMessage());
+			}
+		}
+		catch ( IllegalStateException e ) {
+			e.printStackTrace();
+			setErreur("Les données envoyées sont trop volumineuses." );
+		} catch ( IOException e ) {
+			e.printStackTrace();
+			setErreur("Erreur de configuration du serveur." );
+		} catch ( ServletException e ) {
+			e.printStackTrace();
+			setErreur("Ce type de requete n'est pas supporte, merci d'utiliser "
+					+ "le formulaire prevu pour envoyer votre fichier." );
+		}
+
+		// Si aucune erreur n'est survenue.
+		if ( erreurs.isEmpty() ) {
+			// Validation du fichier.
+			try {
+				validationFichier( contenuFichier );
+			} catch ( Exception e1 ) {
+				setErreur(e1.getMessage() );
+			}
+			fichier=nomFichier;
+		}
+
+		// Si aucune erreur n'est survenue jusqu'à présent */
+		if ( erreurs.isEmpty() ) {
+			/* Écriture du fichier sur le disque */
+			try {
+				ecrireFichier( contenuFichier, nomFichierVoulu, chemin);
+			} catch ( Exception e ) {
+				setErreur("Erreur lors de l'ecriture du fichier sur le disque." );
+			}
+		}
+
+		// Initialisation du résultat global de la validation.
+		if ( erreurs.isEmpty() ) {
+			resultat = "Succès de l'envoi du fichier.";
+		} else {
+			resultat = "Échec de l'envoi du fichier.";
+		}
+
+		return fichier;
+	}
+
+	
+	//******************************************************************************************************************
+
+
+
+}
